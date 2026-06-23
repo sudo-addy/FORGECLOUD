@@ -1,8 +1,23 @@
-use axum::{routing::get, Router};
+mod api;
+pub mod db;
+mod engine;
+
+use axum::{routing::{get, post}, Router};
+use sqlx::PgPool;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+use crate::engine::storage::{StorageProvider, TelegramStorageProvider};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub db: PgPool,
+    pub storage: Arc<dyn StorageProvider>,
+    pub master_key: [u8; 32],
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,8 +31,57 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting forgecloud-backend...");
 
+    // Read database URL
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/forgecloud".to_string());
+
+    // Initialize the database pool
+    let db = db::init_db(&database_url).await?;
+
+    // Run migrations automatically (runtime path-based, no compile-time DATABASE_URL needed)
+    let migrator = sqlx::migrate::Migrator::new(std::path::Path::new("./migrations")).await?;
+    migrator.run(&db).await?;
+    info!("Database migrations complete");
+
+    // Initialize the Telegram storage backend
+    let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
+        .unwrap_or_else(|_| "8664899756:AAFp0SodrRqjMEZKPmPaUlML3YM2Ljr_pqM".to_string());
+    let chat_id = std::env::var("TELEGRAM_CHAT_ID")
+        .unwrap_or_else(|_| "7089254779".to_string());
+    let api_base_url = std::env::var("TELEGRAM_API_URL")
+        .unwrap_or_else(|_| "http://localhost:8081".to_string());
+
+    let storage_provider = TelegramStorageProvider::new(bot_token, chat_id, api_base_url);
+    let storage: Arc<dyn StorageProvider> = Arc::new(storage_provider);
+    info!("Telegram storage provider initialized");
+
+    // Parse the master encryption key from a hex-encoded env var.
+    // Falls back to a deterministic dev-only key when unset.
+    let master_key: [u8; 32] = match std::env::var("MASTER_KEY") {
+        Ok(hex_str) => {
+            let decoded = hex::decode(hex_str.trim())
+                .expect("MASTER_KEY must be valid hex (64 hex chars = 32 bytes)");
+            let mut key = [0u8; 32];
+            assert!(decoded.len() == 32, "MASTER_KEY must decode to exactly 32 bytes");
+            key.copy_from_slice(&decoded);
+            info!("Loaded MASTER_KEY from environment");
+            key
+        }
+        Err(_) => {
+            let key = [0xABu8; 32]; // ⚠ Dev-only fallback — never use in production
+            tracing::warn!("MASTER_KEY not set — using insecure development default");
+            key
+        }
+    };
+
+    let app_state = AppState { db, storage, master_key };
+
     // Build the Axum router
-    let app = Router::new().route("/health", get(|| async { "OK" }));
+    let app = Router::new()
+        .route("/health", get(|| async { "OK" }))
+        .route("/v1/files/upload", post(api::upload::upload_handler))
+        .route("/v1/files/download/:id", get(api::download::download_file_handler))
+        .with_state(app_state);
 
     // Bind the server to 0.0.0.0:3000
     let listener = TcpListener::bind("0.0.0.0:3000").await?;
