@@ -3,7 +3,7 @@ CREATE TABLE files (
     name TEXT NOT NULL,
     total_size BIGINT NOT NULL,
     mime_type TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE chunks (
@@ -12,7 +12,7 @@ CREATE TABLE chunks (
     chunk_number INT NOT NULL,
     backend_chunk_id TEXT NOT NULL,
     size_bytes BIGINT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(file_id, chunk_number)
 );
 

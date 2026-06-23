@@ -3,18 +3,18 @@ pub mod db;
 mod engine;
 
 use axum::{routing::{get, post}, Router};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::engine::storage::{StorageProvider, TelegramStorageProvider};
+use crate::engine::storage::{StorageProvider, TelegramStorageProvider, LocalStorageProvider};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: PgPool,
+    pub db: SqlitePool,
     pub storage: Arc<dyn StorageProvider>,
     pub master_key: [u8; 32],
 }
@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Read database URL
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/forgecloud".to_string());
+        .unwrap_or_else(|_| "sqlite://forgecloud.db".to_string());
 
     // Initialize the database pool
     let db = db::init_db(&database_url).await?;
@@ -43,17 +43,26 @@ async fn main() -> anyhow::Result<()> {
     migrator.run(&db).await?;
     info!("Database migrations complete");
 
-    // Initialize the Telegram storage backend
-    let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
-        .unwrap_or_else(|_| "8664899756:AAFp0SodrRqjMEZKPmPaUlML3YM2Ljr_pqM".to_string());
-    let chat_id = std::env::var("TELEGRAM_CHAT_ID")
-        .unwrap_or_else(|_| "7089254779".to_string());
-    let api_base_url = std::env::var("TELEGRAM_API_URL")
-        .unwrap_or_else(|_| "http://localhost:8081".to_string());
+    // Read storage type, default to local
+    let storage_type = std::env::var("STORAGE_TYPE").unwrap_or_else(|_| "local".to_string());
+    let storage: Arc<dyn StorageProvider> = if storage_type.to_lowercase() == "local" {
+        let local_dir = std::env::var("LOCAL_STORAGE_DIR").unwrap_or_else(|_| "./chunks".to_string());
+        let local_provider = LocalStorageProvider::new(&local_dir).await?;
+        info!("Local storage provider initialized at {:?}", local_dir);
+        Arc::new(local_provider)
+    } else {
+        // Initialize the Telegram storage backend
+        let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
+            .unwrap_or_else(|_| "8664899756:AAFp0SodrRqjMEZKPmPaUlML3YM2Ljr_pqM".to_string());
+        let chat_id = std::env::var("TELEGRAM_CHAT_ID")
+            .unwrap_or_else(|_| "7089254779".to_string());
+        let api_base_url = std::env::var("TELEGRAM_API_URL")
+            .unwrap_or_else(|_| "http://localhost:8081".to_string());
 
-    let storage_provider = TelegramStorageProvider::new(bot_token, chat_id, api_base_url);
-    let storage: Arc<dyn StorageProvider> = Arc::new(storage_provider);
-    info!("Telegram storage provider initialized");
+        let storage_provider = TelegramStorageProvider::new(bot_token, chat_id, api_base_url);
+        info!("Telegram storage provider initialized");
+        Arc::new(storage_provider)
+    };
 
     // Parse the master encryption key from a hex-encoded env var.
     // Falls back to a deterministic dev-only key when unset.

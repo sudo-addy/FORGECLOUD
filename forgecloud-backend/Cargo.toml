@@ -12,7 +12,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-native-tls", "uuid", "chrono"] }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls", "uuid", "chrono"] }
 bytes = "1"
 async-trait = "0.1"
 tracing = "0.1"
@@ -22,3 +22,5 @@ rand = "0.10.1"
 hex = "0.4.3"
 reqwest = { version = "0.13.4", features = ["json", "multipart", "stream"] }
 serde_json = "1.0.150"
+
+netlify: node:internal/modules/cjs/loader:1383 const err = new Error(message); ^ Error: Cannot find module 'minimatch' Require stack: - /home/abhi/.npm/_npx/364ed142633431f1/node_modules/readdir-glob/index.js - /home/abhi/.npm/_npx/364ed142633431f1/node_modules/archiver/lib/core.js - /home/abhi/.npm/_npx/364ed142633431f1/node_modules/archiver/index.js at Function._resolveFilename (node:internal/modules/cjs/loader:1383:15) at defaultResolveImpl (node:internal/modules/cjs/loader:1025:19) at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1030:22) at Function._load (node:internal/modules/cjs/loader:1192:37) at TracingChannel.traceSync (node:diagnostics_channel:328:14) at wrapModuleLoad (node:internal/modules/cjs/loader:237:24) at Module.require (node:internal/modules/cjs/loader:1463:12) at require (node:internal/modules/helpers:147:16) at Object.<anonymous> (/home/abhi/.npm/_npx/364ed142633431f1/node_modules/readdir-glob/index.js:5:23) at Module._compile (node:internal/modules/cjs/loader:1705:14) { code: 'MODULE_NOT_FOUND', requireStack: [ '/home/abhi/.npm/_npx/364ed142633431f1/node_modules/readdir-glob/index.js', '/home/abhi/.npm/_npx/364ed142633431f1/node_modules/archiver/lib/core.js', '/home/abhi/.npm/_npx/364ed142633431f1/node_modules/archiver/index.js' ] } Node.js v22.22.1 : calling "initialize": EOF
