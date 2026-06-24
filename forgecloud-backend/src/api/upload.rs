@@ -63,8 +63,8 @@ pub async fn upload_handler(
         let stream =
             field.map(|res| res.map_err(|e| Error::new(ErrorKind::Other, e.to_string())));
 
-        // Target chunk size: 512MB
-        let target_chunk_size: u64 = 512 * 1024 * 1024;
+        // Target chunk size: 45MB (safely under Telegram public API 50MB limit)
+        let target_chunk_size: u64 = 45 * 1024 * 1024;
 
         // Pass the live network stream directly into the chunker engine
         let chunks = process_upload_stream(stream, storage, target_chunk_size, &state.master_key)

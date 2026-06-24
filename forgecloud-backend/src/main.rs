@@ -3,7 +3,8 @@ pub mod db;
 mod engine;
 
 use axum::{routing::{get, post}, Router};
-use sqlx::SqlitePool;
+use axum::extract::DefaultBodyLimit;
+use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -14,13 +15,16 @@ use crate::engine::storage::{StorageProvider, TelegramStorageProvider, LocalStor
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: SqlitePool,
+    pub db: PgPool,
     pub storage: Arc<dyn StorageProvider>,
     pub master_key: [u8; 32],
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load environment variables from .env file (silently ignore if file not present)
+    dotenvy::dotenv().ok();
+
     // Initialize tracing registry with EnvFilter defaulting to info
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -33,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Read database URL
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://forgecloud.db".to_string());
+        .unwrap_or_else(|_| "postgresql://localhost/forgecloud".to_string());
 
     // Initialize the database pool
     let db = db::init_db(&database_url).await?;
@@ -43,8 +47,8 @@ async fn main() -> anyhow::Result<()> {
     migrator.run(&db).await?;
     info!("Database migrations complete");
 
-    // Read storage type, default to local
-    let storage_type = std::env::var("STORAGE_TYPE").unwrap_or_else(|_| "local".to_string());
+    // Read storage type, default to telegram for serverless mode
+    let storage_type = std::env::var("STORAGE_TYPE").unwrap_or_else(|_| "telegram".to_string());
     let storage: Arc<dyn StorageProvider> = if storage_type.to_lowercase() == "local" {
         let local_dir = std::env::var("LOCAL_STORAGE_DIR").unwrap_or_else(|_| "./chunks".to_string());
         let local_provider = LocalStorageProvider::new(&local_dir).await?;
@@ -53,14 +57,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // Initialize the Telegram storage backend
         let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
-            .unwrap_or_else(|_| "8664899756:AAFp0SodrRqjMEZKPmPaUlML3YM2Ljr_pqM".to_string());
+            .expect("TELEGRAM_BOT_TOKEN must be set");
         let chat_id = std::env::var("TELEGRAM_CHAT_ID")
-            .unwrap_or_else(|_| "7089254779".to_string());
+            .expect("TELEGRAM_CHAT_ID must be set");
         let api_base_url = std::env::var("TELEGRAM_API_URL")
-            .unwrap_or_else(|_| "http://localhost:8081".to_string());
+            .unwrap_or_else(|_| "https://api.telegram.org".to_string());
 
         let storage_provider = TelegramStorageProvider::new(bot_token, chat_id, api_base_url);
-        info!("Telegram storage provider initialized");
+        info!("Telegram storage provider initialized (public API)");
         Arc::new(storage_provider)
     };
 
@@ -89,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/v1/files/upload", post(api::upload::upload_handler))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB body limit for uploads
         .route("/v1/files/download/:id", get(api::download::download_file_handler))
         .with_state(app_state);
 

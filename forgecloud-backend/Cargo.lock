@@ -569,6 +569,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "dotenvy",
  "futures-util",
  "hex",
  "rand 0.10.1",
