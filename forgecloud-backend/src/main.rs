@@ -35,9 +35,9 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting forgecloud-backend...");
 
-    // Read database URL
+    // Read database URL — must be set; no insecure fallback allowed
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://localhost/forgecloud".to_string());
+        .expect("DATABASE_URL must be set (e.g. in .env)");
 
     // Initialize the database pool
     let db = db::init_db(&database_url).await?;
@@ -69,22 +69,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Parse the master encryption key from a hex-encoded env var.
-    // Falls back to a deterministic dev-only key when unset.
-    let master_key: [u8; 32] = match std::env::var("MASTER_KEY") {
-        Ok(hex_str) => {
-            let decoded = hex::decode(hex_str.trim())
-                .expect("MASTER_KEY must be valid hex (64 hex chars = 32 bytes)");
-            let mut key = [0u8; 32];
-            assert!(decoded.len() == 32, "MASTER_KEY must decode to exactly 32 bytes");
-            key.copy_from_slice(&decoded);
-            info!("Loaded MASTER_KEY from environment");
-            key
-        }
-        Err(_) => {
-            let key = [0xABu8; 32]; // ⚠ Dev-only fallback — never use in production
-            tracing::warn!("MASTER_KEY not set — using insecure development default");
-            key
-        }
+    // MASTER_KEY must be set — no insecure fallback is permitted.
+    let master_key: [u8; 32] = {
+        let hex_str = std::env::var("MASTER_KEY")
+            .expect("MASTER_KEY must be set (64 hex chars = 32 bytes)");
+        let decoded = hex::decode(hex_str.trim())
+            .expect("MASTER_KEY must be valid hex (64 hex chars = 32 bytes)");
+        assert!(decoded.len() == 32, "MASTER_KEY must decode to exactly 32 bytes");
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&decoded);
+        info!("Loaded MASTER_KEY from environment");
+        key
     };
 
     let app_state = AppState { db, storage, master_key };
