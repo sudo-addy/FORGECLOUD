@@ -3,7 +3,10 @@ pub mod db;
 mod engine;
 
 use axum::{routing::{get, post}, Router};
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, State, Request};
+use axum::http::{StatusCode, HeaderMap};
+use axum::middleware::{from_fn_with_state, Next};
+use axum::response::{IntoResponse, Response};
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -18,6 +21,25 @@ pub struct AppState {
     pub db: PgPool,
     pub storage: Arc<dyn StorageProvider>,
     pub master_key: [u8; 32],
+    pub api_key: String,
+}
+
+async fn api_key_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, impl IntoResponse> {
+    let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
+    
+    if api_key != Some(&state.api_key) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "Unauthorized: Invalid or missing x-api-key header" }))
+        ));
+    }
+    
+    Ok(next.run(request).await)
 }
 
 #[tokio::main]
@@ -82,14 +104,21 @@ async fn main() -> anyhow::Result<()> {
         key
     };
 
-    let app_state = AppState { db, storage, master_key };
+    let api_key = std::env::var("API_KEY").expect("API_KEY must be set for secure access");
+
+    let app_state = AppState { db, storage, master_key, api_key };
 
     // Build the Axum router
+    let files_router = Router::new()
+        .route("/", get(api::list::list_files_handler))
+        .route("/upload", post(api::upload::upload_handler))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB body limit for uploads
+        .route("/download/:id", get(api::download::download_file_handler))
+        .route_layer(from_fn_with_state(app_state.clone(), api_key_auth));
+
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
-        .route("/v1/files/upload", post(api::upload::upload_handler))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB body limit for uploads
-        .route("/v1/files/download/:id", get(api::download::download_file_handler))
+        .nest("/v1/files", files_router)
         .with_state(app_state);
 
     // Bind the server to 0.0.0.0:3000
