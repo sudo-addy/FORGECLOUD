@@ -1,17 +1,18 @@
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 
+use axum::extract::Query;
 use axum::{
     extract::{Multipart, State},
     http::StatusCode,
     Json,
 };
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::engine::chunker::process_upload_stream;
+use crate::AppState;
 
 #[derive(Serialize)]
 pub struct UploadResponse {
@@ -26,6 +27,11 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UploadQuery {
+    pub folder_id: Option<Uuid>,
+}
+
 /// Helper to build a consistent error tuple.
 fn err_response(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     (status, Json(ErrorResponse { error: msg.into() }))
@@ -34,16 +40,18 @@ fn err_response(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json
 #[instrument(skip(state, multipart), fields(file_name, content_type))]
 pub async fn upload_handler(
     State(state): State<AppState>,
+    Query(query): Query<UploadQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
     let storage = state.storage;
 
     // Inspect multipart fields sequentially to look for a file field
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| err_response(StatusCode::BAD_REQUEST, format!("Failed to read multipart field: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        err_response(
+            StatusCode::BAD_REQUEST,
+            format!("Failed to read multipart field: {e}"),
+        )
+    })? {
         // Only process fields that are file uploads
         let file_name = match field.file_name() {
             Some(name) => {
@@ -60,8 +68,7 @@ pub async fn upload_handler(
 
         // Do NOT load into memory via .bytes().
         // Extract the underlying body stream and map errors to a unified std::io::Error type.
-        let stream =
-            field.map(|res| res.map_err(|e| Error::new(ErrorKind::Other, e.to_string())));
+        let stream = field.map(|res| res.map_err(|e| Error::other(e.to_string())));
 
         // Target chunk size: 45MB (safely under Telegram public API 50MB limit)
         let target_chunk_size: u64 = 45 * 1024 * 1024;
@@ -69,7 +76,12 @@ pub async fn upload_handler(
         // Pass the live network stream directly into the chunker engine
         let chunks = process_upload_stream(stream, storage, target_chunk_size, &state.master_key)
             .await
-            .map_err(|e| err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Upload processing failed: {e}")))?;
+            .map_err(|e| {
+                err_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Upload processing failed: {e}"),
+                )
+            })?;
 
         // ---------------------------------------------------------------
         // Database insertion inside a transaction
@@ -78,17 +90,21 @@ pub async fn upload_handler(
         let total_size: i64 = chunks.iter().map(|c| c.size_bytes as i64).sum();
 
         let mut tx = state.db.begin().await.map_err(|e| {
-            err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to begin transaction: {e}"))
+            err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to begin transaction: {e}"),
+            )
         })?;
 
         // Insert file record
         sqlx::query(
-            "INSERT INTO files (id, name, total_size, mime_type) VALUES ($1, $2, $3, $4)"
+            "INSERT INTO files (id, name, total_size, mime_type, folder_id) VALUES ($1, $2, $3, $4, $5)"
         )
         .bind(file_id)
         .bind(&file_name)
         .bind(total_size)
         .bind(mime_type.as_deref())
+        .bind(query.folder_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -120,7 +136,10 @@ pub async fn upload_handler(
 
         // Commit only when all records are verified
         tx.commit().await.map_err(|e| {
-            err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to commit transaction: {e}"))
+            err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to commit transaction: {e}"),
+            )
         })?;
 
         return Ok(Json(UploadResponse {

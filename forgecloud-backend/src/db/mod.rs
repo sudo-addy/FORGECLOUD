@@ -1,4 +1,7 @@
-use sqlx::{postgres::{PgConnectOptions, PgPoolOptions}, PgPool};
+use sqlx::{
+    postgres::{PgConnectOptions, PgPoolOptions},
+    PgPool,
+};
 use std::str::FromStr;
 
 pub async fn init_db(database_url: &str) -> Result<PgPool, anyhow::Error> {
@@ -8,6 +11,9 @@ pub async fn init_db(database_url: &str) -> Result<PgPool, anyhow::Error> {
         .max_connections(5)
         .connect_with(connection_options)
         .await?;
-    
+
+    // Automatically run migrations from the migrations/ directory
+    sqlx::migrate!().run(&pool).await?;
+
     Ok(pool)
 }

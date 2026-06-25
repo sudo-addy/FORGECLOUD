@@ -22,7 +22,7 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     let mut uploaded_chunks = Vec::new();
-    
+
     // Bounded memory buffer to accumulate chunks sequentially
     let mut buffer = Vec::with_capacity(target_chunk_size as usize);
 
@@ -34,7 +34,7 @@ where
         if buffer.len() as u64 >= target_chunk_size {
             let info = encrypt_and_upload(&buffer, &storage, master_key).await?;
             uploaded_chunks.push(info);
-            
+
             // Clear the buffer memory cleanly without reallocation
             buffer.clear();
         }
@@ -44,7 +44,7 @@ where
     if !buffer.is_empty() {
         let info = encrypt_and_upload(&buffer, &storage, master_key).await?;
         uploaded_chunks.push(info);
-        
+
         buffer.clear();
     }
 

@@ -2,27 +2,36 @@
 
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { UploadCloud, DownloadCloud, Lock, File as FileIcon, CheckCircle, AlertCircle } from "lucide-react";
+import { Lock } from "lucide-react";
+import { UploadCard } from "../components/UploadCard";
+import { DownloadCard } from "../components/DownloadCard";
+import { VaultLedger } from "../components/VaultLedger";
+import { PreviewModal } from "../components/PreviewModal";
+import { useUpload } from "../hooks/useUpload";
+import { useVault } from "../hooks/useVault";
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
 
 export default function Home() {
   const [apiKey, setApiKey] = useState("");
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
 
-  // Upload Engine State
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState("");
-  const [fileId, setFileId] = useState("");
+  // Upload Engine State - Extracted to useUpload
+
 
   // Download Engine State
   const [downloadFileId, setDownloadFileId] = useState("");
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState("");
 
-  // Vault Ledger State
-  const [vaultFiles, setVaultFiles] = useState([]);
-  const [isFetchingFiles, setIsFetchingFiles] = useState(false);
+  // Vault Ledger State - Extracted to useVault
+
+  // Preview State
+  const [previewFile, setPreviewFile] = useState(null);
+  const [previewBlobUrl, setPreviewBlobUrl] = useState(null);
+  const [previewTextContent, setPreviewTextContent] = useState(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
 
   useEffect(() => {
     setIsMounted(true);
@@ -31,37 +40,52 @@ export default function Home() {
       setApiKey(storedKey);
       setIsAuthorized(true);
     }
+
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") closePreview();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Fetch Vault Files when authorized
+  const {
+    vaultFiles,
+    folders,
+    currentFolderId,
+    setCurrentFolderId,
+    breadcrumbs,
+    setBreadcrumbs,
+    isFetchingFiles,
+    newFolderName,
+    setNewFolderName,
+    isCreatingFolder,
+    fetchVaultFiles,
+    handleCreateFolder,
+    handleMoveFile,
+    handleDelete,
+    resetVault
+  } = useVault(isAuthorized);
+
+  // Re-fetch when authorized or folder changes
   useEffect(() => {
     if (isAuthorized) {
       fetchVaultFiles();
     }
-  }, [isAuthorized]);
+  }, [isAuthorized, currentFolderId, fetchVaultFiles]);
 
-  const fetchVaultFiles = async () => {
-    setIsFetchingFiles(true);
-    const storedKey = localStorage.getItem("fc_api_key");
-    try {
-      const response = await fetch("http://localhost:3000/v1/files", {
-        method: "GET",
-        headers: {
-          "x-api-key": storedKey,
-        },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setVaultFiles(data);
-      } else {
-        console.error("Failed to fetch files from Vault");
-      }
-    } catch (error) {
-      console.error("Error fetching Vault files:", error);
-    } finally {
-      setIsFetchingFiles(false);
-    }
-  };
+  const {
+    selectedFile,
+    setSelectedFile,
+    isUploading,
+    uploadStatus,
+    uploadProgress,
+    fileId,
+    setFileId,
+    setUploadStatus,
+    setUploadProgress,
+    handleUpload,
+    resetUpload
+  } = useUpload(currentFolderId, fetchVaultFiles);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -75,52 +99,63 @@ export default function Home() {
     localStorage.removeItem("fc_api_key");
     setApiKey("");
     setIsAuthorized(false);
-    setSelectedFile(null);
-    setUploadStatus("");
-    setFileId("");
+    resetUpload();
+    resetVault();
     setDownloadFileId("");
     setDownloadStatus("");
-    setVaultFiles([]);
+    closePreview();
   };
 
-  const handleUpload = async (e) => {
-    e.preventDefault();
-    if (!selectedFile) return;
+  const closePreview = () => {
+    setPreviewFile(null);
+    setPreviewTextContent(null);
+    setIsPreviewLoading(false);
+    if (previewBlobUrl) {
+      URL.revokeObjectURL(previewBlobUrl);
+      setPreviewBlobUrl(null);
+    }
+  };
 
-    setIsUploading(true);
-    setUploadStatus("Encrypting and slicing chunks...");
-    setFileId("");
+  const handlePreview = async (file) => {
+    const mime = file.mime_type || "";
+    const isImage = mime.startsWith("image/");
+    const isVideo = mime.startsWith("video/");
+    const isAudio = mime.startsWith("audio/");
+    const isPdf = mime === "application/pdf";
+    const isText = mime.startsWith("text/") || mime === "application/json";
+
+    if (!isImage && !isVideo && !isAudio && !isPdf && !isText) {
+      alert("Preview not available for this file type. Download required.");
+      return;
+    }
+
+    setPreviewFile(file);
+    setIsPreviewLoading(true);
 
     const storedKey = localStorage.getItem("fc_api_key");
-    const formData = new FormData();
-    formData.append("file", selectedFile);
-
     try {
-      const response = await fetch("http://localhost:3000/v1/files/upload", {
-        method: "POST",
-        headers: {
-          "x-api-key": storedKey,
-        },
-        body: formData,
+      const response = await fetch(`${API_BASE_URL}/v1/files/download/${file.id}`, {
+        method: "GET",
+        headers: { "x-api-key": storedKey },
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Upload failed with status ${response.status}`);
-      }
+      if (!response.ok) throw new Error("Failed to load preview");
 
-      const data = await response.json();
-      setFileId(data.id);
-      setUploadStatus("Upload successful!");
+      const blob = await response.blob();
       
-      // Refresh the ledger after successful upload
-      fetchVaultFiles();
-      
+      if (isText) {
+        const text = await blob.text();
+        setPreviewTextContent(text);
+      } else {
+        const url = URL.createObjectURL(blob);
+        setPreviewBlobUrl(url);
+      }
     } catch (error) {
-      console.error("Upload error:", error);
-      setUploadStatus("Error: " + error.message);
+      console.error("Preview error:", error);
+      alert("Failed to load preview: " + error.message);
+      closePreview();
     } finally {
-      setIsUploading(false);
+      setIsPreviewLoading(false);
     }
   };
 
@@ -136,7 +171,7 @@ export default function Home() {
     const storedKey = localStorage.getItem("fc_api_key");
 
     try {
-      const response = await fetch(`http://localhost:3000/v1/files/download/${targetId}`, {
+      const response = await fetch(`${API_BASE_URL}/v1/files/download/${targetId}`, {
         method: "GET",
         headers: {
           "x-api-key": storedKey,
@@ -230,149 +265,46 @@ export default function Home() {
         <div className="flex flex-col md:flex-row gap-8 w-full justify-center">
           
           {/* Upload Card */}
-          <motion.div 
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.1, ease: "easeOut" }}
-            className="bg-gradient-to-b from-white/[0.08] to-transparent border-t border-white/20 border-x-0 border-b-0 backdrop-blur-xl shadow-2xl rounded-2xl p-8 flex flex-col items-center w-full md:w-96 gap-6 relative group"
-          >
-            <div className="absolute inset-0 bg-gradient-to-b from-white/[0.02] to-transparent rounded-2xl pointer-events-none" />
-            <div className="flex items-center gap-3 relative z-10">
-              <UploadCloud className="text-indigo-400" size={28} />
-              <h2 className="text-xl font-light tracking-[0.2em] text-white">UPLOAD</h2>
-            </div>
-            
-            <form onSubmit={handleUpload} className="flex flex-col items-center gap-6 w-full relative z-10">
-              <label className="w-full relative cursor-pointer group/upload">
-                <input 
-                  type="file" 
-                  onChange={(e) => setSelectedFile(e.target.files[0])}
-                  className="hidden"
-                />
-                <div className="w-full border border-dashed border-white/20 rounded-xl p-6 flex flex-col items-center justify-center gap-2 bg-black/20 group-hover/upload:border-indigo-400/50 group-hover/upload:bg-indigo-900/10 transition-all">
-                  <FileIcon className={selectedFile ? "text-indigo-400" : "text-zinc-600"} size={24} />
-                  <span className="text-xs tracking-wider text-zinc-400 text-center truncate w-full px-2">
-                    {selectedFile ? selectedFile.name : "SELECT FILE"}
-                  </span>
-                </div>
-              </label>
-              
-              <button 
-                type="submit" 
-                disabled={isUploading || !selectedFile}
-                className="w-full py-3 bg-white/10 border border-white/10 text-white text-sm tracking-[0.1em] rounded hover:bg-white/20 hover:shadow-[0_0_20px_rgba(255,255,255,0.2)] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-              >
-                {isUploading ? "UPLOADING..." : "EXECUTE SECURE UPLOAD"}
-              </button>
-            </form>
-
-            {(uploadStatus || fileId) && (
-              <div className="w-full mt-2 relative z-10">
-                {uploadStatus && (
-                  <p className="text-xs text-indigo-300 tracking-wider text-center mb-4 flex items-center justify-center gap-2">
-                    {uploadStatus.includes("Error") ? <AlertCircle size={14} className="text-red-400" /> : <CheckCircle size={14} />}
-                    {uploadStatus}
-                  </p>
-                )}
-                
-                {fileId && (
-                  <div className="w-full p-4 bg-black/40 border border-white/5 rounded-lg text-center overflow-hidden backdrop-blur-md">
-                    <p className="text-[10px] text-zinc-500 mb-2 tracking-[0.3em]">SECURE FILE ID</p>
-                    <p className="text-xs font-mono text-white break-all select-all">{fileId}</p>
-                  </div>
-                )}
-              </div>
-            )}
-          </motion.div>
+          <UploadCard 
+            selectedFile={selectedFile}
+            setSelectedFile={setSelectedFile}
+            isUploading={isUploading}
+            uploadProgress={uploadProgress}
+            uploadStatus={uploadStatus}
+            fileId={fileId}
+            handleUpload={handleUpload}
+          />
 
           {/* Download Card */}
-          <motion.div 
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.2, ease: "easeOut" }}
-            className="bg-gradient-to-b from-white/[0.08] to-transparent border-t border-white/20 border-x-0 border-b-0 backdrop-blur-xl shadow-2xl rounded-2xl p-8 flex flex-col items-center w-full md:w-96 gap-6 relative"
-          >
-            <div className="absolute inset-0 bg-gradient-to-b from-white/[0.02] to-transparent rounded-2xl pointer-events-none" />
-            <div className="flex items-center gap-3 relative z-10">
-              <DownloadCloud className="text-indigo-400" size={28} />
-              <h2 className="text-xl font-light tracking-[0.2em] text-white">DOWNLOAD</h2>
-            </div>
-            
-            <form onSubmit={handleDownload} className="flex flex-col items-center gap-6 w-full relative z-10">
-              <div className="w-full relative">
-                <input 
-                  type="text" 
-                  placeholder="PASTE UUID..."
-                  value={downloadFileId}
-                  onChange={(e) => setDownloadFileId(e.target.value)}
-                  className="w-full bg-black/40 border border-white/10 text-white rounded-xl px-4 py-4 focus:outline-none focus:border-indigo-400/50 text-center text-xs tracking-widest placeholder:text-zinc-600 transition-colors"
-                />
-              </div>
-              
-              <button 
-                type="submit" 
-                disabled={isDownloading || !downloadFileId.trim()}
-                className="w-full py-3 bg-white/10 border border-white/10 text-white text-sm tracking-[0.1em] rounded hover:bg-white/20 hover:shadow-[0_0_20px_rgba(255,255,255,0.2)] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-              >
-                {isDownloading ? "DECRYPTING..." : "INITIATE TRANSFER"}
-              </button>
-            </form>
-
-            {downloadStatus && (
-              <p className="text-xs text-indigo-300 tracking-wider text-center mt-2 flex items-center justify-center gap-2 relative z-10">
-                {downloadStatus.includes("Error") ? <AlertCircle size={14} className="text-red-400" /> : <CheckCircle size={14} />}
-                {downloadStatus}
-              </p>
-            )}
-          </motion.div>
+          <DownloadCard 
+            downloadFileId={downloadFileId}
+            setDownloadFileId={setDownloadFileId}
+            isDownloading={isDownloading}
+            downloadStatus={downloadStatus}
+            handleDownload={handleDownload}
+          />
         </div>
 
         {/* Vault Ledger */}
-        <motion.div 
-          initial={{ opacity: 0, y: 40 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.3, ease: "easeOut" }}
-          className="w-full max-w-4xl mt-4 flex flex-col gap-4 relative z-10"
-        >
-          <h2 className="text-xs font-light tracking-[0.4em] text-indigo-400 mb-2 pl-2 shadow-indigo-500/20 drop-shadow-md">ENCRYPTED LEDGER</h2>
-          
-          {isFetchingFiles && vaultFiles.length === 0 ? (
-            <p className="text-zinc-500 text-xs tracking-widest pl-2">SYNCING WITH VAULT...</p>
-          ) : vaultFiles.length === 0 ? (
-            <p className="text-zinc-500 text-xs tracking-widest pl-2">NO FILES DETECTED IN VAULT.</p>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {vaultFiles.map((file, i) => (
-                <motion.div 
-                  key={file.id}
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.5, delay: 0.4 + (i * 0.05), ease: "easeOut" }}
-                  className="bg-gradient-to-r from-white/[0.05] to-transparent border-t border-white/10 backdrop-blur-md rounded-lg p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 group hover:bg-white/[0.08] transition-colors"
-                >
-                  <div className="flex flex-col gap-1">
-                    <span className="font-semibold text-white tracking-wide">{file.name}</span>
-                    <span className="text-xs text-zinc-500 tracking-wider">
-                      {new Date(file.created_at).toLocaleString()} &nbsp;•&nbsp; {(file.total_size / 1024).toFixed(2)} KB
-                    </span>
-                  </div>
-                  
-                  <div className="flex items-center gap-6 w-full sm:w-auto justify-between sm:justify-end">
-                    <span className="text-xs font-mono text-zinc-600 tracking-widest truncate max-w-[150px] sm:max-w-none">{file.id}</span>
-                    <button 
-                      onClick={() => handleDownload(null, file.id)}
-                      disabled={isDownloading}
-                      className="p-2 bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 hover:text-indigo-300 rounded transition-colors disabled:opacity-50"
-                      title="Download File"
-                    >
-                      <DownloadCloud size={18} />
-                    </button>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-          )}
-        </motion.div>
+        <VaultLedger
+          isAuthorized={isAuthorized}
+          vaultFiles={vaultFiles}
+          folders={folders}
+          isFetchingFiles={isFetchingFiles}
+          newFolderName={newFolderName}
+          setNewFolderName={setNewFolderName}
+          isCreatingFolder={isCreatingFolder}
+          handleCreateFolder={handleCreateFolder}
+          breadcrumbs={breadcrumbs}
+          currentFolderId={currentFolderId}
+          setCurrentFolderId={setCurrentFolderId}
+          setBreadcrumbs={setBreadcrumbs}
+          handlePreview={handlePreview}
+          handleMoveFile={handleMoveFile}
+          handleDownload={handleDownload}
+          handleDelete={handleDelete}
+          isDownloading={isDownloading}
+        />
 
         <motion.button
           initial={{ opacity: 0 }}
@@ -385,6 +317,15 @@ export default function Home() {
           LOCK VAULT
         </motion.button>
       </motion.div>
+
+      {/* Preview Modal */}
+      <PreviewModal 
+        previewFile={previewFile}
+        previewBlobUrl={previewBlobUrl}
+        previewTextContent={previewTextContent}
+        isPreviewLoading={isPreviewLoading}
+        closePreview={closePreview}
+      />
     </div>
   );
 }

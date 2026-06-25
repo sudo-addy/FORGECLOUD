@@ -195,7 +195,10 @@ impl TelegramStorageProvider {
 
     /// Build the URL for downloading a file by its `file_path`.
     fn file_url(&self, file_path: &str) -> String {
-        format!("{}/file/bot{}/{}", self.api_base_url, self.bot_token, file_path)
+        format!(
+            "{}/file/bot{}/{}",
+            self.api_base_url, self.bot_token, file_path
+        )
     }
 }
 
@@ -292,9 +295,9 @@ impl StorageProvider for TelegramStorageProvider {
         }
 
         // Stream the response body directly — zero buffering.
-        let stream = file_resp.bytes_stream().map(|result| {
-            result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        });
+        let stream = file_resp
+            .bytes_stream()
+            .map(|result| result.map_err(std::io::Error::other));
 
         Ok(Box::pin(stream))
     }
