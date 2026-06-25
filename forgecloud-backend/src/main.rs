@@ -11,6 +11,8 @@ use axum::{
     Router,
 };
 use sqlx::PgPool;
+use uuid::Uuid;
+
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -115,6 +117,19 @@ async fn main() -> anyhow::Result<()> {
 
     let api_key = std::env::var("API_KEY").expect("API_KEY must be set for secure access");
 
+    // Run startup recovery process
+    if let Err(e) = run_startup_recovery(&db).await {
+        tracing::error!("Startup recovery failed: {}", e);
+    } else {
+        // Run an immediate cleanup pass for any abandoned sessions on startup
+        if let Err(e) = perform_sessions_cleanup(&db, &storage).await {
+            tracing::error!("Startup cleanup pass failed: {}", e);
+        }
+    }
+
+    // Start background cleanup worker
+    start_background_cleanup_worker(db.clone(), storage.clone());
+
     let app_state = AppState {
         db,
         storage,
@@ -122,8 +137,9 @@ async fn main() -> anyhow::Result<()> {
         api_key,
     };
 
-    let allowed_origins_str =
-        std::env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let allowed_origins_str = std::env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| {
+        "http://localhost:3000,http://localhost:3001,http://localhost:3002".to_string()
+    });
 
     let allowed_origins: Vec<HeaderValue> = allowed_origins_str
         .split(',')
@@ -163,8 +179,39 @@ async fn main() -> anyhow::Result<()> {
     // Build the Axum router
     let files_router = Router::new()
         .route("/", get(api::list::list_files_handler))
-        .route("/upload", post(api::upload::upload_handler))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB body limit for uploads
+        .route(
+            "/upload",
+            post(api::upload::upload_handler).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/upload/session",
+            post(api::upload::start_upload_session_handler),
+        )
+        .route(
+            "/upload/session/:id",
+            get(api::upload::get_upload_session_handler),
+        )
+        .route(
+            "/upload/session/:id/chunk",
+            post(api::upload::upload_session_chunk_handler).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/upload/session/:id/commit",
+            post(api::upload::commit_upload_session_handler),
+        )
+        .route(
+            "/upload/session/:id/abort",
+            post(api::upload::abort_upload_session_handler),
+        )
+        .route(
+            "/upload/session/:id/pause",
+            post(api::upload::pause_upload_session_handler),
+        )
+        .route(
+            "/upload/session/:id/resume",
+            post(api::upload::resume_upload_session_handler),
+        )
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB body limit for other endpoints above
         .route("/download/:id", get(api::download::download_file_handler))
         .route(
             "/:id",
@@ -221,9 +268,12 @@ async fn main() -> anyhow::Result<()> {
     info!("Listening on {}", listener.local_addr()?);
 
     // Run the server with graceful shutdown signal handler
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }
@@ -252,4 +302,76 @@ async fn shutdown_signal() {
     }
 
     info!("Shutdown signal received, starting graceful shutdown");
+}
+
+async fn run_startup_recovery(db: &PgPool) -> Result<(), sqlx::Error> {
+    let affected = sqlx::query(
+        "UPDATE upload_sessions \
+         SET status = 'Abandoned', updated_at = CURRENT_TIMESTAMP \
+         WHERE status IN ('Created', 'Uploading', 'PendingCommit')",
+    )
+    .execute(db)
+    .await?;
+    info!(
+        "Startup recovery: Marked {} unfinished upload sessions as Abandoned",
+        affected.rows_affected()
+    );
+    Ok(())
+}
+
+fn start_background_cleanup_worker(db: PgPool, storage: Arc<dyn StorageProvider>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await; // Run every 30 minutes
+            info!("Running background upload sessions cleanup worker...");
+            if let Err(e) = perform_sessions_cleanup(&db, &storage).await {
+                tracing::error!("Error in background cleanup worker: {}", e);
+            }
+        }
+    });
+}
+
+async fn perform_sessions_cleanup(
+    db: &PgPool,
+    storage: &Arc<dyn StorageProvider>,
+) -> Result<(), anyhow::Error> {
+    use sqlx::Row;
+    // Find all sessions in 'Abandoned' or 'Failed' status,
+    // OR 'Created'/'Uploading'/'Paused' sessions that haven't had any activity for more than 2 hours.
+    let sessions = sqlx::query(
+        "SELECT id FROM upload_sessions \
+         WHERE status IN ('Abandoned', 'Failed') \
+            OR (status IN ('Created', 'Uploading', 'Paused') AND last_activity_at < CURRENT_TIMESTAMP - INTERVAL '2 hours')",
+    )
+    .fetch_all(db)
+    .await?;
+
+    for session_row in sessions {
+        let session_id: Uuid = session_row.get("id");
+        info!(
+            "Cleaning up expired/abandoned upload session: {}",
+            session_id
+        );
+
+        // Fetch all pending chunks for this session
+        let chunks = sqlx::query(
+            "SELECT backend_chunk_id FROM pending_session_chunks WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_all(db)
+        .await?;
+
+        // Delete chunks physically from storage
+        for chunk in chunks {
+            let backend_chunk_id: String = chunk.get("backend_chunk_id");
+            let _ = storage.delete_chunk(&backend_chunk_id).await;
+        }
+
+        // Delete the session (cascades to pending_session_chunks)
+        sqlx::query("DELETE FROM upload_sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(db)
+            .await?;
+    }
+    Ok(())
 }
