@@ -496,7 +496,7 @@ pub async fn commit_upload_session_handler(
 
     // 2. Fetch pending chunks
     let chunks = sqlx::query_as::<_, PendingChunkInfo>(
-        "SELECT backend_chunk_id, size_bytes, chunk_number, chunk_sha256 FROM pending_session_chunks WHERE session_id = $1 ORDER BY chunk_number ASC"
+        "SELECT backend_chunk_id, encrypted_size AS size_bytes, chunk_number, chunk_sha256 FROM pending_session_chunks WHERE session_id = $1 ORDER BY chunk_number ASC"
     )
     .bind(session_id)
     .fetch_all(&state.db)

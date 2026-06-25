@@ -143,23 +143,92 @@ pub async fn delete_folder_handler(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<FolderResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // IMPORTANT: Because of ON DELETE CASCADE, deleting a folder will instantly delete all subfolders
-    // AND files from the database.
-    // To prevent orphans in Telegram/Local storage, we should ideally fetch ALL nested file IDs
-    // recursively and call `state.storage.delete_chunk` on them.
-    // Given the complexity of a recursive physical cleanup, this implementation drops the DB records instantly.
-    // In production, an async garbage collection job would sweep the storage layer.
+    // 1. Begin transaction to safely retrieve structure and perform DB delete
+    let mut tx = state.db.begin().await.map_err(|e| {
+        err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to start transaction: {}", e),
+        )
+    })?;
 
-    sqlx::query("DELETE FROM folders WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
+    // 2. Fetch all nested folder IDs recursively (including parent)
+    let folder_ids = sqlx::query_scalar::<_, Uuid>(
+        "WITH RECURSIVE folder_tree AS ( \
+            SELECT id FROM folders WHERE id = $1 \
+            UNION ALL \
+            SELECT f.id FROM folders f \
+            JOIN folder_tree ft ON f.parent_id = ft.id \
+         ) \
+         SELECT id FROM folder_tree"
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| {
+        err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to retrieve folder structure: {}", e),
+        )
+    })?;
+
+    // 3. Fetch all files inside those folders
+    let file_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM files WHERE folder_id = ANY($1)"
+    )
+    .bind(&folder_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| {
+        err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to retrieve folder files: {}", e),
+        )
+    })?;
+
+    // 4. Fetch all chunks for those files
+    let chunk_ids = if file_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT backend_chunk_id FROM chunks WHERE file_id = ANY($1)"
+        )
+        .bind(&file_ids)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| {
             err_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error: {}", e),
+                format!("Failed to retrieve file chunks: {}", e),
+            )
+        })?
+    };
+
+    // 5. Delete physical chunks from storage (non-blocking best-effort deletion)
+    for cid in chunk_ids {
+        if let Err(e) = state.storage.delete_chunk(&cid).await {
+            tracing::warn!("Failed to delete physical chunk {} from storage: {}", cid, e);
+        }
+    }
+
+    // 6. Delete folder from database (cascades files & chunks via DB constraints)
+    sqlx::query("DELETE FROM folders WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to delete folder record: {}", e),
             )
         })?;
+
+    // 7. Commit the transaction
+    tx.commit().await.map_err(|e| {
+        err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to commit folder deletion: {}", e),
+        )
+    })?;
 
     Ok(Json(FolderResponse {
         message: "Folder deleted recursively".into(),
